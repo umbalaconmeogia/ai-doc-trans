@@ -1,2 +1,14 @@
 "project_id","project_name","rule_name","rule_type","content","remarks"
-1,"global","Product code","do_not_translate_pattern","^[A-Za-z][A-Za-z0-9]+[a-z0-9]$","Sample: NVL001"
+1,"global","Product code","do_not_translate_pattern","^[A-Za-z]{2}[A-Za-z0-9]*\d$","Sample: NVL001"
+1,"global","Roman numerals","do_not_translate_pattern","^[IVXLCDMivxlcdm]+$",
+1,"global","One alphabet","do_not_translate_pattern","^[A-Za-z0-9]$",
+1,"global","One alphabet","do_not_translate_pattern","^\d+ml$",
+1,"global","m2","do_not_translate_string","m2",
+1,"global","m3","do_not_translate_string","m3",
+1,"global","USD","do_not_translate_string","USD",
+1,"global","VND","do_not_translate_string","VND",
+1,"global","kg","do_not_translate_string","kg",
+1,"global","%","do_not_translate_string","%",
+1,"global","Vitamin C","do_not_translate_string","Vitamin C",
+1,"global","Vitamin B12","do_not_translate_string","Vitamin B12",
+1,"global","Vitamin B6","do_not_translate_string","Vitamin B6",
