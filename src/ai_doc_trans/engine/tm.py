@@ -269,7 +269,7 @@ class TM:
         """
         query = """SELECT ss.source_text AS source,
                           COALESCE(st.target_text, '') AS target,
-                          ss.source_lang,
+                          ss.source_lang AS source_lang,
                           ? AS target_lang,
                           ss.structure,
                           ss.position
