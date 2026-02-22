@@ -1,0 +1,4 @@
+project_id,project_name,term,source_lang,target_lang,translation,context,remarks
+1,global,customer,en,vi,khách hàng,,
+1,global,supplier,en,vi,nhà cung cấp,,
+1,global,delivery,en,vi,giao hàng,logistics,

@@ -8,7 +8,7 @@ Thiết kế cơ bản cho công cụ dịch tài liệu, dựa trên [SR.md](./
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                              doc-trans                                       │
+│                            ai-doc-trans                                      │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
 │  ┌─────────────┐    ┌─────────────────┐    ┌─────────────────┐             │
@@ -53,7 +53,7 @@ Mỗi đơn vị dịch (segment) gồm:
 - **Word / PPT:** Paragraph, list item, shape thường không có id cố định trong format file; có thể thay đổi khi chỉnh sửa
 - **Rebuild:** Extract lại document; tại mỗi vị trí, tính `source_hash` → tra TM → thay bằng bản dịch. Không dùng thứ tự; match theo hash.
 
-**Khóa tra TM:** `(source_hash, source_lang, target_lang)`. Dùng `hash(source)` hoặc `hash(structure + source)` làm `source_hash`. Với tài liệu kỹ thuật, cùng một term trong các ngữ cảnh khác nhau (vd. heading vs body) có thể cần dịch khác – khi đó dùng `hash(structure + source)` để phân biệt.
+**Khóa tra TM:** `(source_hash, source_lang, target_lang)`. Dùng `sha256(structure + source_text)` làm `source_hash` (UTF-8, hex digest). Cùng một term trong ngữ cảnh khác nhau (vd. heading vs body) có thể cần dịch khác – dùng structure làm phần của hash để phân biệt. Hash algorithm cố định, không thay đổi sau khi có dữ liệu trong TM.
 
 ---
 
@@ -88,6 +88,7 @@ Tách riêng source và target; dùng **INTEGER id** cho `*_sources`, FK từ `*
 │  created_at     TEXT      NOT NULL   -- ISO 8601                                  │
 ├─────────────────────────────────────────────────────────────────────────────────┤
 │  PRIMARY KEY (id), UNIQUE (source_hash)                                           │
+│  INDEX idx_segment_sources_hash ON segment_sources(source_hash)                   │
 └─────────────────────────────────────────────────────────────────────────────────┘
                                          │
                                          │ 1 ────── N
@@ -114,6 +115,7 @@ Tách riêng source và target; dùng **INTEGER id** cho `*_sources`, FK từ `*
 │  source_lang    TEXT      NOT NULL   -- Ngôn ngữ nguồn                            │
 │  project_id     INTEGER   NOT NULL   -- 1 = chung; >1 = theo project              │
 │  context        TEXT                 -- Ngữ cảnh (optional)                       │
+│  remarks        TEXT                 -- Ghi chú (optional)                        │
 │  created_at     TEXT      NOT NULL   -- ISO 8601                                  │
 ├─────────────────────────────────────────────────────────────────────────────────┤
 │  PRIMARY KEY (id), UNIQUE (term, source_lang, project_id)                         │
@@ -125,7 +127,7 @@ Tách riêng source và target; dùng **INTEGER id** cho `*_sources`, FK từ `*
 │  glossary_targets                                                                │
 ├─────────────────────────────────────────────────────────────────────────────────┤
 │  source_id      INTEGER   NOT NULL   -- FK → glossary_sources.id                 │
-│  target_lang    TEXT      NOT NULL   -- Ngôn ngữ đích                             │
+│  target_lang    TEXT      NOT NULL   -- Ngôn ngữ đích; "" = áp dụng mọi ngôn ngữ  │
 │  translation    TEXT      NOT NULL   -- Bản dịch thuật ngữ                         │
 │  created_at     TEXT      NOT NULL   -- ISO 8601                                  │
 │  updated_at     TEXT      NOT NULL   -- ISO 8601                                  │
@@ -139,15 +141,17 @@ Tách riêng source và target; dùng **INTEGER id** cho `*_sources`, FK từ `*
 ├─────────────────────────────────────────────────────────────────────────────────┤
 │  id             INTEGER   NOT NULL   -- PK, AUTOINCREMENT                         │
 │  project_id     INTEGER   NOT NULL   -- 1 = chung; >1 = theo project              │
+│  rule_name      TEXT                 -- Tên mô tả rule (dễ hiểu)                  │
 │  rule_type      TEXT      NOT NULL   -- do_not_translate_pattern, instruction     │
 │  content        TEXT      NOT NULL   -- regex pattern hoặc instruction text       │
+│  remarks        TEXT                 -- Ghi chú (optional)                        │
 │  created_at     TEXT      NOT NULL   -- ISO 8601                                  │
 ├─────────────────────────────────────────────────────────────────────────────────┤
 │  PRIMARY KEY (id)                                                                 │
 └─────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Tra cứu:** Ưu tiên bản có `project_id` trùng với project hiện tại; không có thì dùng `project_id = 1`.
+**Tra cứu:** Ưu tiên bản có `project_id` trùng với project hiện tại; không có thì dùng `project_id = 1`. **Glossary target_lang:** rỗng (`""`) = áp dụng cho mọi ngôn ngữ; target_lang cụ thể override target_lang rỗng.
 
 ---
 
@@ -179,8 +183,16 @@ Tách rời **translate** (tạo translated_segments) và **import** (ghi vào T
 ### 4.3 Rebuilder
 
 ```
-[document gốc] + [translated_segments] → Rebuilder → [file mới]
+[document gốc] + TM DB → Rebuilder → [file mới]
 ```
+
+### 4.4 Compare (Excel)
+
+```
+[source_file] + [target_file] → Compare → [báo cáo diff]
+```
+
+Dùng thông tin `position` (sheet!cell) từ source để tìm ô tương ứng trong target, so sánh nội dung. Hỗ trợ kiểm tra sau rebuild: source có text, target có bản dịch hay không.
 
 ---
 
@@ -216,7 +228,7 @@ Ví dụ (mặc định):
 
 | Định dạng | Unit segment | Structure | Ghi chú |
 |-----------|--------------|-----------|---------|
-| **Excel** | Cell text (tránh number, date, function) | `cell` (hoặc `header` nếu có) | Không dịch code sản phẩm (vd. NVL1000) – xử lý ở Extract hoặc dùng translation_rules |
+| **Excel** | Cell text (bỏ number, date, formula ở tầng extractor; bỏ mã hàng hóa qua `do_not_translate_pattern`) | `cell` (hoặc `header` nếu có) | Lọc tại extract; rebuild dùng cùng logic lọc |
 | **Word** | Paragraph, list item, heading | `para`, `heading_1`, `heading_2`, `list_item` | position = page number |
 | **PowerPoint** | Text trong shape, textbox, placeholder | `title`, `body`, `textbox` | position = slide number |
 
@@ -227,7 +239,11 @@ Phase 1 (Excel): có thể đơn giản hóa, chưa cần structure phức tạp
 ## 7. Rebuilder
 
 - **Input:** document gốc + TM DB (--tm, --tgt, --project). **Không** nhận translated_segments file.
-- **Luồng:** Extract lại document → tại mỗi vị trí có text, tính `source_hash` → tra `segment_targets` trong TM → lấy `target_text` → thay thế. Match theo hash, không theo thứ tự.
+- **Luồng:** Extract lại document → tại mỗi vị trí có text:
+  1. Match `do_not_translate_pattern` → giữ nguyên, không tra TM
+  2. Không match → tính `source_hash` → tra `segment_targets` trong TM → lấy `target_text` → thay thế
+  3. **Không tìm thấy trong TM → báo lỗi** (liệt kê các segment thiếu bản dịch, dừng hoặc xuất báo cáo lỗi tùy option). Không âm thầm bỏ qua.
+- Rebuild dùng **cùng bộ `translation_rules`** với extract → đảm bảo nhất quán, không có segment "lọt qua extract nhưng không có trong TM"
 - Giữ nguyên format (font, màu, border, v.v.)
 - Với Excel phức tạp: có thể dùng COM (PowerShell) nếu thư viện làm vỡ format
 
@@ -241,23 +257,30 @@ Phase 1 (Excel): có thể đơn giản hóa, chưa cần structure phức tạp
 |------------|-----------|
 | Ngôn ngữ | Python 3.x (đa nền tảng) |
 | TM | SQLite |
-| Excel | `openpyxl` (hoặc fallback COM trên Windows) |
+| Excel | `openpyxl` (Phase 1: đủ dùng vì chỉ update cell value, giữ nguyên format. Fallback COM trên Windows nếu cần xử lý chart/object phức tạp ở phase sau) |
 | Word | `python-docx` |
 | PowerPoint | `python-pptx` |
 | AI | API (Gemini, GPT, Claude) hoặc integration Cursor/script |
-| CLI | `argparse` hoặc `click` |
+| CLI | `click` (đề xuất: hỗ trợ subcommand group tốt hơn argparse, dễ mở rộng) |
 
 ---
 
 ## 9. Giao diện CLI (PoC)
 
-Tách riêng các lệnh để tránh ôm quá nhiều xử lý vào một CLI:
+Tách riêng các lệnh để tránh ôm quá nhiều xử lý vào một CLI. CLI dùng `click` với subcommand group. `--output` bắt buộc truyền (không có default).
 
 ```
-doctrans extract    <input> [--output <path>] [--tm <path>] [--project <name|id>] [--tag-open <char>] [--tag-close <char>]
-doctrans translate  <segments_file> [--mode full|update] [--tgt <lang>] [--glossary <file>] [--tm <path>] [--project <name|id>] [--output <path>]
-doctrans import     <translated_segments> [--tm <path>] [--project <name|id>] [--tgt <lang>]
-doctrans rebuild    <input> [--output <path>] [--tm <path>] [--tgt <lang>] [--project <name|id>]
+ai-doc-trans extract    <input> --output <path> [--tm <path>] [--project <id>] [--source-lang <lang>] [--tag-open <char>] [--tag-close <char>]
+ai-doc-trans translate  <segments_file> --output <path> [--mode full|update] [--tgt <lang>] [--tm <path>] [--project <id>] [--batch-size <n>] [--glossary <csv>] [--rules <csv>]
+ai-doc-trans import     <translated_segments> [--tm <path>] [--project <id>] [--tgt <lang>]  # --tgt optional when target_lang in file
+ai-doc-trans rebuild    <input> --output <path> [--tm <path>] [--tgt <lang>] [--project <id>]
+ai-doc-trans compare    <source_file> <target_file> [--output <path>] [--tm <path>]
+ai-doc-trans project    create <name>
+ai-doc-trans project    list
+ai-doc-trans glossary   import <csv> --project <id> [--tm <path>]
+ai-doc-trans glossary   export <csv> [--project <id>] [--source-lang] [--tgt] [--tm <path>]
+ai-doc-trans rules      export <csv> [--project <id>] [--tm <path>]
+ai-doc-trans rules      import <csv> --project <id> [--tm <path>]
 ```
 
 ### 9.1 Luồng dữ liệu & vai trò TM DB
@@ -265,9 +288,9 @@ doctrans rebuild    <input> [--output <path>] [--tm <path>] [--tgt <lang>] [--pr
 | Bước | Hành vi |
 |------|---------|
 | **extract** | Đọc document → tách segments → **ghi vào segment_sources trong TM DB** (insert if not exists) → **xuất segments_file** (danh sách segment theo thứ tự document) |
-| **translate** | Đọc **segments_file** → tạo **translated_segments** (--mode full: dịch toàn bộ; --mode update: tra TM, dịch thiếu). Không ghi TM. Nguồn dịch: AI/API, Cursor IDE, hoặc thủ công |
+| **translate** | Đọc **segments_file** → tạo **translated_segments**. Glossary và rules mặc định từ DB; dùng --glossary, --rules để chỉ định file CSV thay DB. Nguồn dịch: AI/API, Cursor IDE, hoặc thủ công. |
 | **import** | Đọc translated_segments (có source_hash/source_id) → match theo key, không theo thứ tự → **upsert segment_targets** vào TM DB |
-| **rebuild** | Đọc document → extract lại → tra TM theo source_hash → thay bằng bản dịch → xuất file mới. Không nhận translated_segments |
+| **rebuild** | Đọc document → extract lại → áp dụng `do_not_translate_pattern` (giữ nguyên) → tra TM theo source_hash → thay bằng bản dịch → xuất file mới. **Báo lỗi nếu segment cần dịch không có trong TM.** Không nhận translated_segments |
 
 **segments_file** = output của `extract`. **translated_segments** = segments_file + target cho mỗi segment; nên có đủ source_hash/source_id để import match theo key, không theo thứ tự.
 
@@ -282,13 +305,14 @@ doctrans rebuild    <input> [--output <path>] [--tm <path>] [--tgt <lang>] [--pr
 ]
 ```
 
-**translated_segments** nên **bao gồm đầy đủ thông tin** từ segments_file cộng target, để import/rebuild chính xác, không phụ thuộc thứ tự:
+**translated_segments** nên **bao gồm đầy đủ thông tin** từ segments_file cộng target và target_lang, để import/rebuild chính xác, không phụ thuộc thứ tự:
 ```json
 [
-  {"source": "Introduction", "source_hash": "abc", "source_id": 1, "target": "Giới thiệu", "structure": "heading_1", "source_lang": "en"}
+  {"source": "Introduction", "source_hash": "abc", "source_id": 1, "target": "Giới thiệu", "structure": "heading_1", "source_lang": "en", "target_lang": "vi"}
 ]
 ```
-Với `source_hash`/`source_id`, import match theo key thay vì theo thứ tự.
+- `target_lang` cùng cấp với `source_lang`, mô tả ngôn ngữ đích. Import đọc từ file; `--tgt` tùy chọn (override hoặc fallback cho file cũ thiếu target_lang).
+- Với `source_hash`/`source_id`, import match theo key thay vì theo thứ tự.
 
 ### 9.3 Translate với file lớn
 
@@ -306,29 +330,88 @@ Với `source_hash`/`source_id`, import match theo key thay vì theo thứ tự.
 
 **translation_rules** (schema trên): `rule_type` = `do_not_translate_pattern` | `instruction`; `content` = regex hoặc text.
 
-Extract/translate dùng rules từ TM. Extract có thể bỏ qua cell match pattern; hoặc đánh dấu `no_translate`; translate copy nguyên văn.
+**`do_not_translate_pattern` áp dụng ở cả extract lẫn rebuild** (dùng cùng một bộ rules từ TM DB):
+- **Extract:** segment match pattern → bỏ qua hoàn toàn, không đưa vào segments_file, không ghi TM
+- **Rebuild:** vị trí match pattern → bỏ qua, giữ nguyên text gốc, không tra TM
+
+Vì cả hai bước dùng cùng logic lọc, segments_file chỉ chứa những segment thực sự cần dịch. TM không bị pollute bởi entry "dịch = nguyên văn". Không dùng đánh dấu `no_translate`.
+
+Các trường hợp áp dụng `do_not_translate_pattern`:
+- Mã hàng hóa, mã sản phẩm (vd. `NVL\d+`, `SP-\d+`) → match regex pattern
+- Cell không phải kiểu text (number, date, formula) → lọc ở tầng extractor (không phụ thuộc translation_rules)
+
+**`instruction`** chỉ dùng ở bước translate: đưa vào prompt AI.
+
+#### 9.4.1 Sample translation_rules
+
+Ví dụ SQL để thêm rules (project_id = 1 = global):
+
+```sql
+-- Bỏ qua mã nguyên vật liệu (vd. NVL1000, NVL2001)
+INSERT INTO translation_rules (project_id, rule_name, rule_type, content, created_at)
+VALUES (1, 'Mã NVL', 'do_not_translate_pattern', 'NVL\d+', datetime('now'));
+
+-- Bỏ qua mã sản phẩm (vd. SP-001, SP-123)
+INSERT INTO translation_rules (project_id, rule_name, rule_type, content, created_at)
+VALUES (1, 'Mã sản phẩm', 'do_not_translate_pattern', 'SP-\d+', datetime('now'));
+
+-- Instruction cho AI khi dịch
+INSERT INTO translation_rules (project_id, rule_name, rule_type, content, created_at)
+VALUES (1, 'Style headings', 'instruction', 'Translate headings concisely. Keep technical terms consistent with glossary.', datetime('now'));
+```
+
+Pattern là **regex** (Python `re`). Ví dụ thêm: `^[A-Z]{2,4}\d{4,}$` (mã dạng AB1234), `^\d+$` (chỉ số).
+
+#### 9.4.2 rules export / import (CSV)
+
+Thay vì chạy SQL, có thể export/import translation_rules qua CSV để thuận tiện và tái sử dụng giữa các project.
+
+**CSV format:** `project_id`, `project_name`, `rule_name`, `rule_type`, `content`, `remarks` (project_id/project_name trong CSV chỉ để tham khảo; rule_name, remarks tùy chọn)
+
+- **export:** Xuất rules ra CSV. `--project` để lọc theo project; bỏ qua thì xuất tất cả.
+- **import:** Chỉ định `--project` trên command line. Xóa **toàn bộ rules của project đó**, rồi insert từng dòng CSV vào project đó. Cột project_id/project_name trong CSV không dùng khi import.
+
+#### 9.4.3 glossary export / import (CSV)
+
+Tương tự rules, glossary export/import qua CSV để thuận tiện và tái sử dụng giữa các project.
+
+**CSV format:** `project_id`, `project_name`, `term`, `source_lang`, `target_lang`, `translation`, `context`, `remarks` (project_id/project_name trong CSV chỉ để tham khảo)
+
+- **target_lang rỗng (null hoặc ""):** Áp dụng cho **mọi ngôn ngữ đích**. Tra cứu ưu tiên bản dịch theo target_lang cụ thể, không có thì dùng bản target_lang rỗng.
+- **export:** Xuất glossary ra CSV. `--project`, `--source-lang`, `--tgt` tùy chọn để lọc; bỏ qua thì xuất tất cả.
+- **import:** Chỉ định `--project` trên command line. Xóa **toàn bộ glossary của project đó**, rồi insert từng dòng CSV vào project đó.
 
 ### 9.5 Mô tả lệnh
 
 | Lệnh | Mô tả |
 |------|-------|
-| `extract` | Đọc file, tách segments, ghi segment_sources, xuất segments_file |
+| `extract` | Đọc file, lọc segment (bỏ non-text, áp dụng `do_not_translate_pattern`), ghi segment_sources, xuất segments_file |
 | `translate` | Tạo translated_segments (--mode full: dịch toàn bộ; --mode update: tra TM trước). Không ghi TM |
-| `import` | segments_file + translated_segments → upsert segment_targets vào TM DB |
-| `rebuild` | Extract lại document, tra TM theo source_hash, thay bằng bản dịch; xuất file mới. Không nhận translated_segments |
+| `import` | translated_segments → upsert segment_targets vào TM DB (match theo source_hash/source_id, không theo thứ tự) |
+| `rebuild` | Extract lại document, áp dụng `do_not_translate_pattern` (giữ nguyên), tra TM theo source_hash → thay bằng bản dịch; **báo lỗi nếu segment cần dịch không có trong TM**; xuất file mới |
+| `compare` | So sánh file Excel gốc và file đã dịch theo position (sheet!cell). Output báo cáo diff source vs target |
+| `project create` | Tạo project mới trong TM DB |
+| `project list` | Liệt kê tất cả project trong TM DB |
+| `glossary import` | Import glossary từ CSV vào project chỉ định; **xóa glossary của project đó**, insert lại từ CSV |
+| `glossary export` | Export glossary ra CSV (--project, --source-lang, --tgt để lọc; bỏ qua = xuất tất cả) |
+| `rules export` | Export translation_rules ra CSV (theo project hoặc tất cả) |
+| `rules import` | Import translation_rules từ CSV vào project chỉ định; **xóa rules của project đó**, insert lại từ CSV. Cho phép tái sử dụng rules giữa các project |
 
 **Tham số chung:**
-- `--tag-open`, `--tag-close`: cho `extract`
-- `--glossary`, `--tm`: cho `translate`, `import`. Glossary và translation_rules lấy từ TM DB (theo project). Có thể import glossary từ CSV
-- `--batch-size`: cho `translate`, kích thước batch khi gọi API (mặc định xử lý theo batch)
-- `--project`: chỉ định project (id hoặc name); mặc định 1 (global) khi dùng TM
+- `--output`: bắt buộc truyền cho `extract`, `translate`, `rebuild` (không có default)
+- `--tag-open`, `--tag-close`: cho `extract`. Mặc định `{`, `}`
+- `--source-lang`: cho `extract`. Ngôn ngữ nguồn mặc định per-document (Phase 1)
+- `--tm`: đường dẫn TM DB. Mặc định `data/doc_trans.db`
+- `--project`: chỉ định project id; mặc định 1 (global)
+- `--batch-size`: cho `translate`, kích thước batch khi gọi AI API (mặc định 50)
+- `--mode full|update`: cho `translate`. Glossary và translation_rules lấy từ TM DB (theo project)
 
 ---
 
 ## 10. Cấu trúc thư mục đề xuất
 
 ```
-doc-trans/
+ai-doc-trans/
 ├── src/
 │   ├── extractors/
 │   │   ├── base.py
@@ -354,7 +437,8 @@ doc-trans/
 
 | Rủi ro | Giảm thiểu |
 |--------|------------|
-| Thư viện làm vỡ format Excel/Word | Fallback COM (PowerShell) trên Windows; test với file thật |
+| Thư viện làm vỡ format Excel/Word | Phase 1: openpyxl chỉ update `.value`, không đổi format → an toàn. Fallback COM (PowerShell) ở phase sau nếu cần chart/object |
 | API dịch tốn phí | PoC dùng free tier / Cursor; production chọn API phù hợp |
-| Segment quá dài | Chia segment theo giới hạn token của model |
-| Rebuild sai vị trí | Đảm bảo extract/rebuild cùng thứ tự duyệt; validate sau rebuild |
+| Segment quá dài | Chia batch qua `--batch-size`; mặc định 50 segment/batch |
+| Rebuild sai vị trí | Extract/rebuild cùng thứ tự duyệt; dùng `compare` để validate source vs target sau rebuild |
+| Hash algorithm thay đổi | `sha256(structure + source_text)` cố định; không đổi khi đã có dữ liệu trong TM DB |

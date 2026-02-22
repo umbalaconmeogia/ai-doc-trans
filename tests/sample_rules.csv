@@ -1,0 +1,4 @@
+project_id,project_name,rule_name,rule_type,content,remarks
+1,global,Mã NVL,do_not_translate_pattern,NVL\d+,
+1,global,Mã sản phẩm,do_not_translate_pattern,SP-\d+,
+1,global,Style headings,instruction,Translate headings concisely. Keep technical terms consistent with glossary.,

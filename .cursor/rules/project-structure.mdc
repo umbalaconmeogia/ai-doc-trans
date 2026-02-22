@@ -1,0 +1,15 @@
+---
+description: Project structure and documentation locations
+alwaysApply: true
+---
+
+# Project Structure
+
+Design documents for this project are located in `docs/DesignDocument/`.
+
+Key documents include:
+- `docs/DesignDocument/BD.md` - Business Design / main design document
+- `docs/DesignDocument/SR.md` - System Requirements
+- `docs/DesignDocument/CLI-sample.md` - CLI usage examples
+
+Refer to these documents when discussing architecture, requirements, or design decisions.
