@@ -1,25 +1,39 @@
 from __future__ import annotations
 
+from typing import Optional
+
 from ai_doc_trans.engine.tm import TM
 from ai_doc_trans.models import TranslatedSegment
 
 
 def run_import(
     translated: list[TranslatedSegment],
-    target_lang: str,
+    target_lang: Optional[str],
     tm: TM,
     project_id: int,
-) -> int:
+) -> tuple[int, int]:
     """
-    Upsert translations from *translated* into the TM database.
+    Import segments into the TM database.
 
-    Match is done by source_id (order-independent).
-    Returns the number of records upserted.
+    For each segment: ensures segment_source exists (get_or_create_source).
+    When target and target_lang are present: also upserts segment_target.
+    Works with source-only JSON (e.g. output of extract).
+
+    Returns (sources_ensured, targets_upserted).
     """
-    count = 0
+    sources_ensured = 0
+    targets_upserted = 0
     for ts in translated:
-        if not ts.target:
-            continue
-        tm.upsert_target(ts.source_id, target_lang, project_id, ts.target)
-        count += 1
-    return count
+        source_id = tm.get_or_create_source(
+            source_hash=ts.source_hash,
+            source_text=ts.source,
+            source_lang=ts.source_lang,
+            structure=ts.structure,
+            project_id=project_id,
+            position=ts.position,
+        )
+        sources_ensured += 1
+        if ts.target and target_lang:
+            tm.upsert_target(source_id, target_lang, ts.target)
+            targets_upserted += 1
+    return sources_ensured, targets_upserted

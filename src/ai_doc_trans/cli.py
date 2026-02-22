@@ -142,24 +142,33 @@ def cmd_translate(segments_file, output, mode, tgt, tm, project, batch_size, glo
 @_tm_option()
 @_project_option()
 def cmd_import(translated_segments, tgt, tm, project):
-    """Import TRANSLATED_SEGMENTS into the TM database."""
+    """Import segments into the TM database.
+
+    Accepts both source-only JSON (e.g. output of extract) and translated_segments
+    (with target). When target is present, use --tgt or target_lang in file.
+    """
     from ai_doc_trans.engine.importer import run_import
     from ai_doc_trans.io.segments import load_translated_segments
 
     translated = load_translated_segments(translated_segments)
     if not translated:
         raise click.UsageError("No segments to import.")
-    target_lang = tgt or translated[0].target_lang
-    if not target_lang:
+    has_targets = any(ts.target for ts in translated)
+    target_lang = tgt or (translated[0].target_lang if translated else None)
+    if has_targets and not target_lang:
         raise click.UsageError(
-            "Target language required: add target_lang to each segment in the file, or use --tgt."
+            "Target language required when file has targets: add target_lang to each segment, or use --tgt."
         )
 
     with TM(tm) as tm_db:
         project_id = tm_db.resolve_project_id(project)
-        count = run_import(translated, target_lang, tm_db, project_id)
+        sources_ensured, targets_upserted = run_import(translated, target_lang, tm_db, project_id)
 
-    click.echo(f"Imported {count} translations into TM ({tm})")
+    msg = f"Imported {sources_ensured} segment sources"
+    if targets_upserted:
+        msg += f", {targets_upserted} translations"
+    msg += f" into TM ({tm})"
+    click.echo(msg)
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +254,17 @@ def project_list(tm):
         click.echo(f"{p['id']:>4}  {p['name']:<30}  {p['created_at']}")
 
 
+@project_group.command("clear")
+@click.option("--project", required=True, help="Project id to clear all segment translations from.")
+@_tm_option()
+def project_clear(project, tm):
+    """Delete all segment translations belonging to the specified project."""
+    with TM(tm) as tm_db:
+        project_id = tm_db.resolve_project_id(project)
+        count = tm_db.clear_project_segments(project_id)
+    click.echo(f"Cleared {count} segments from project {project!r} ({tm})")
+
+
 # ---------------------------------------------------------------------------
 # glossary group
 # ---------------------------------------------------------------------------
@@ -303,6 +323,55 @@ def glossary_export(csv_file, project, source_lang, tgt, tm):
         writer.writeheader()
         writer.writerows(entries)
     click.echo(f"Exported {len(entries)} glossary entries → {csv_file}")
+
+
+# ---------------------------------------------------------------------------
+# segment group (CSV export/import for translated segments)
+# ---------------------------------------------------------------------------
+
+@cli.group("segment")
+def segment_group():
+    """Export or import translated segments to/from CSV for easy editing."""
+
+
+@segment_group.command("export")
+@click.option("--output", "-o", required=True, type=click.Path(path_type=Path), help="Output CSV path.")
+@click.option("--tgt", required=True, help="Target language to export (e.g. vi, en).")
+@click.option("--source-lang", default=None, help="Filter by source language. Omit to export all.")
+@_tm_option()
+@_project_option()
+def segment_export(output, tgt, source_lang, tm, project):
+    """Export segment translations from TM DB to CSV.
+
+    CSV columns: source, target, source_lang, target_lang, structure, position.
+    """
+    from ai_doc_trans.io.segments_csv import export_tm_to_csv
+
+    with TM(tm) as tm_db:
+        project_id = tm_db.resolve_project_id(project)
+        count = export_tm_to_csv(
+            tm_db, output, project_id, tgt, source_lang=source_lang
+        )
+    click.echo(f"Exported {count} segments → {output}")
+
+
+@segment_group.command("import")
+@click.argument("csv_file", type=click.Path(exists=True, path_type=Path))
+@click.option("--tgt", required=True, help="Target language (e.g. vi, en).")
+@_tm_option()
+@_project_option()
+def segment_import(csv_file, tgt, tm, project):
+    """Import CSV into TM DB (upsert segment_targets).
+
+    CSV columns: source, target, source_lang, target_lang, structure, position.
+    source_hash and source_id derived from TM (lookup by hash or create).
+    """
+    from ai_doc_trans.io.segments_csv import import_csv_to_tm
+
+    with TM(tm) as tm_db:
+        project_id = tm_db.resolve_project_id(project)
+        count = import_csv_to_tm(csv_file, tm_db, project_id, target_lang=tgt)
+    click.echo(f"Imported {count} translations into TM ({tm})")
 
 
 # ---------------------------------------------------------------------------

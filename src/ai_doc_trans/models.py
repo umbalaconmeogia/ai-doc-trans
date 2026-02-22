@@ -67,11 +67,11 @@ class TranslatedSegment:
         return cls(
             source=d["source"],
             source_hash=d["source_hash"],
-            source_id=d["source_id"],
-            structure=d["structure"],
-            source_lang=d["source_lang"],
+            source_id=d.get("source_id", 0),  # 0 unused when resolving via hash
+            structure=d.get("structure", "cell"),
+            source_lang=d.get("source_lang", "en"),
             target_lang=d.get("target_lang"),
-            target=d["target"],
+            target=d.get("target", ""),  # empty = source-only (no translation)
             position=d.get("position"),
         )
 

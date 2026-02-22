@@ -53,7 +53,7 @@ Mỗi đơn vị dịch (segment) gồm:
 - **Word / PPT:** Paragraph, list item, shape thường không có id cố định trong format file; có thể thay đổi khi chỉnh sửa
 - **Rebuild:** Extract lại document; tại mỗi vị trí, tính `source_hash` → tra TM → thay bằng bản dịch. Không dùng thứ tự; match theo hash.
 
-**Khóa tra TM:** `(source_hash, source_lang, target_lang)`. Dùng `sha256(structure + source_text)` làm `source_hash` (UTF-8, hex digest). Cùng một term trong ngữ cảnh khác nhau (vd. heading vs body) có thể cần dịch khác – dùng structure làm phần của hash để phân biệt. Hash algorithm cố định, không thay đổi sau khi có dữ liệu trong TM.
+**Khóa tra TM:** `(source_hash, source_lang, target_lang)`. Dùng `sha256(source_text)` làm `source_hash` (UTF-8, hex digest). Mỗi `source_text` chỉ có 1 bản ghi trong `segment_sources` (per project). Hash algorithm cố định, không thay đổi sau khi có dữ liệu trong TM.
 
 ---
 
@@ -63,7 +63,7 @@ Mỗi đơn vị dịch (segment) gồm:
 
 ### 3.1 Cấu trúc DB (SQLite)
 
-Tách riêng source và target; dùng **INTEGER id** cho `*_sources`, FK từ `*_targets`. `project_id = 1` = company-wide (chung, tên "global"); `project_id > 1` = theo project. Tra cứu: ưu tiên bản có `project_id` trùng, không có thì dùng `project_id = 1`. *Dùng 1 thay vì 0 để tránh vấn đề với SQLite.*
+Tách riêng source và target; dùng **INTEGER id** cho `*_sources`, FK từ `*_targets`. `project_id = 1` = company-wide (chung, tên "global"); `project_id > 1` = theo project. **Segment:** `segment_sources` có `project_id`; mỗi source thuộc đúng một project, không fallback. `segment_targets` phụ thuộc `source_id` nên không cần `project_id`. **Glossary / rules:** Tra cứu ưu tiên bản project trùng, không có thì dùng `project_id = 1`. *Dùng 1 thay vì 0 để tránh vấn đề với SQLite.*
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────┐
@@ -80,15 +80,16 @@ Tách riêng source và target; dùng **INTEGER id** cho `*_sources`, FK từ `*
 │  segment_sources                                                                 │
 ├─────────────────────────────────────────────────────────────────────────────────┤
 │  id             INTEGER   NOT NULL   -- PK, AUTOINCREMENT                         │
-│  source_hash    TEXT      NOT NULL   -- UNIQUE, tra cứu insert/lookup             │
+│  project_id     INTEGER   NOT NULL   -- Mỗi source thuộc đúng một project        │
+│  source_hash    TEXT      NOT NULL   -- Tra cứu insert/lookup (theo project)      │
 │  source_text    TEXT      NOT NULL   -- Văn bản gốc                               │
 │  source_lang    TEXT      NOT NULL   -- Mã ngôn ngữ nguồn (en, vi, ...)          │
 │  structure      TEXT                 -- cell, para, heading_1, list_item, ...     │
 │  position       TEXT                 -- Tham khảo: page số (docx, pptx), Sheet1!A1 (Excel) │
 │  created_at     TEXT      NOT NULL   -- ISO 8601                                  │
 ├─────────────────────────────────────────────────────────────────────────────────┤
-│  PRIMARY KEY (id), UNIQUE (source_hash)                                           │
-│  INDEX idx_segment_sources_hash ON segment_sources(source_hash)                   │
+│  PRIMARY KEY (id), UNIQUE (source_hash, project_id)                               │
+│  INDEX idx_segment_sources_hash_project ON segment_sources(source_hash, project_id) │
 └─────────────────────────────────────────────────────────────────────────────────┘
                                          │
                                          │ 1 ────── N
@@ -98,12 +99,11 @@ Tách riêng source và target; dùng **INTEGER id** cho `*_sources`, FK từ `*
 ├─────────────────────────────────────────────────────────────────────────────────┤
 │  source_id      INTEGER   NOT NULL   -- FK → segment_sources.id                  │
 │  target_lang    TEXT      NOT NULL   -- Mã ngôn ngữ đích                         │
-│  project_id     INTEGER   NOT NULL   -- 1 = chung; >1 = override theo project     │
 │  target_text    TEXT      NOT NULL   -- Bản dịch                                  │
 │  created_at     TEXT      NOT NULL   -- ISO 8601                                  │
 │  updated_at     TEXT      NOT NULL   -- ISO 8601                                  │
 ├─────────────────────────────────────────────────────────────────────────────────┤
-│  PRIMARY KEY (source_id, target_lang, project_id)                                 │
+│  PRIMARY KEY (source_id, target_lang)                                             │
 │  FOREIGN KEY (source_id) REFERENCES segment_sources(id) ON DELETE CASCADE         │
 └─────────────────────────────────────────────────────────────────────────────────┘
 
@@ -151,7 +151,7 @@ Tách riêng source và target; dùng **INTEGER id** cho `*_sources`, FK từ `*
 └─────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Tra cứu:** Ưu tiên bản có `project_id` trùng với project hiện tại; không có thì dùng `project_id = 1`. **Glossary target_lang:** rỗng (`""`) = áp dụng cho mọi ngôn ngữ; target_lang cụ thể override target_lang rỗng.
+**Tra cứu:** **Segment:** Tra `(source_hash, project_id)` trong `segment_sources`, không fallback. **Glossary / rules:** Ưu tiên bản có `project_id` trùng với project hiện tại; không có thì dùng `project_id = 1`. **Glossary target_lang:** rỗng (`""`) = áp dụng cho mọi ngôn ngữ; target_lang cụ thể override target_lang rỗng.
 
 ---
 
@@ -279,6 +279,7 @@ ai-doc-trans project    create <name>
 ai-doc-trans project    list
 ai-doc-trans glossary   import <csv> --project <id> [--tm <path>]
 ai-doc-trans glossary   export <csv> [--project <id>] [--source-lang] [--tgt] [--tm <path>]
+ai-doc-trans segment    export -o <csv> --tgt <lang> [--tm] [--project] / import <csv> --tgt <lang> [--tm] [--project]
 ai-doc-trans rules      export <csv> [--project <id>] [--tm <path>]
 ai-doc-trans rules      import <csv> --project <id> [--tm <path>]
 ```
@@ -287,18 +288,18 @@ ai-doc-trans rules      import <csv> --project <id> [--tm <path>]
 
 | Bước | Hành vi |
 |------|---------|
-| **extract** | Đọc document → tách segments → **ghi vào segment_sources trong TM DB** (insert if not exists) → **xuất segments_file** (danh sách segment theo thứ tự document) |
+| **extract** | Đọc document → tách segments (dedupe theo source_hash) → **ghi vào segment_sources trong TM DB** (insert if not exists) → **xuất segments_file** (1 record/unique source_text) |
 | **translate** | Đọc **segments_file** → tạo **translated_segments**. Glossary và rules mặc định từ DB; dùng --glossary, --rules để chỉ định file CSV thay DB. Nguồn dịch: AI/API, Cursor IDE, hoặc thủ công. |
 | **import** | Đọc translated_segments (có source_hash/source_id) → match theo key, không theo thứ tự → **upsert segment_targets** vào TM DB |
 | **rebuild** | Đọc document → extract lại → áp dụng `do_not_translate_pattern` (giữ nguyên) → tra TM theo source_hash → thay bằng bản dịch → xuất file mới. **Báo lỗi nếu segment cần dịch không có trong TM.** Không nhận translated_segments |
 
-**segments_file** = output của `extract`. **translated_segments** = segments_file + target cho mỗi segment; nên có đủ source_hash/source_id để import match theo key, không theo thứ tự.
+**segments_file** = output của `extract` — mỗi source_text unique (1 record). **translated_segments** = segments_file + target; import match theo source_hash/source_id, không theo thứ tự.
 
 **Tách translate + import:** translate chỉ tạo translated_segments; import ghi vào TM DB. Có thể dùng Cursor IDE dịch thay vì API, rồi chạy import. Linh hoạt cho PoC.  “mới/chưa dịch” (Trong translate --mode update: tra segment_targets theo (source_id, target_lang) — không có bản dịch thì gọi AI. Có thể truyền thêm các segment đã dịch làm context cho AI để thống nhất phong cách.
 
 ### 9.2 Format segments_file và translated_segments
 
-**segments_file** (output của extract):
+**segments_file** (output của extract, unique by source_hash):
 ```json
 [
   {"source": "Introduction", "structure": "heading_1", "source_lang": "en", "source_hash": "...", "source_id": 1, "position": "Sheet1!A1"}
@@ -381,6 +382,17 @@ Tương tự rules, glossary export/import qua CSV để thuận tiện và tái
 - **export:** Xuất glossary ra CSV. `--project`, `--source-lang`, `--tgt` tùy chọn để lọc; bỏ qua thì xuất tất cả.
 - **import:** Chỉ định `--project` trên command line. Xóa **toàn bộ glossary của project đó**, rồi insert từng dòng CSV vào project đó.
 
+#### 9.4.4 segment export / import (CSV)
+
+Export/import segment translations **trực tiếp giữa TM DB và CSV** (không qua JSON). Dễ chỉnh sửa trong Excel. **Nhược điểm:** CSV phù hợp văn bản đơn giản.
+
+**CSV format:** `source`, `target`, `source_lang`, `target_lang`, `structure`, `position`. `source_hash` và `source_id` không lưu; tra/ghi qua TM theo hash khi import.
+
+- **export:** Xuất từ TM DB ra CSV. Cần `--tgt`, `--project`. Tùy chọn `--source-lang` để lọc.
+- **import:** Đọc CSV, ghi thẳng vào TM DB (upsert segment_targets). Hash tính từ source text; tra TM để lấy/tạo source_id. Cần `--tgt`, `--project`.
+
+**Luồng:** extract → translate → import (ghi TM) → segment export (TM → CSV) → edit CSV → segment import (CSV → TM) → rebuild.
+
 ### 9.5 Mô tả lệnh
 
 | Lệnh | Mô tả |
@@ -392,8 +404,11 @@ Tương tự rules, glossary export/import qua CSV để thuận tiện và tái
 | `compare` | So sánh file Excel gốc và file đã dịch theo position (sheet!cell). Output báo cáo diff source vs target |
 | `project create` | Tạo project mới trong TM DB |
 | `project list` | Liệt kê tất cả project trong TM DB |
+| `project clear` | Xóa toàn bộ segments (segment_sources + cascade segment_targets) thuộc project chỉ định |
 | `glossary import` | Import glossary từ CSV vào project chỉ định; **xóa glossary của project đó**, insert lại từ CSV |
 | `glossary export` | Export glossary ra CSV (--project, --source-lang, --tgt để lọc; bỏ qua = xuất tất cả) |
+| `segment export` | Xuất segment translations từ TM DB ra CSV |
+| `segment import` | Import CSV thẳng vào TM DB (upsert segment_targets) |
 | `rules export` | Export translation_rules ra CSV (theo project hoặc tất cả) |
 | `rules import` | Import translation_rules từ CSV vào project chỉ định; **xóa rules của project đó**, insert lại từ CSV. Cho phép tái sử dụng rules giữa các project |
 
@@ -441,4 +456,4 @@ ai-doc-trans/
 | API dịch tốn phí | PoC dùng free tier / Cursor; production chọn API phù hợp |
 | Segment quá dài | Chia batch qua `--batch-size`; mặc định 50 segment/batch |
 | Rebuild sai vị trí | Extract/rebuild cùng thứ tự duyệt; dùng `compare` để validate source vs target sau rebuild |
-| Hash algorithm thay đổi | `sha256(structure + source_text)` cố định; không đổi khi đã có dữ liệu trong TM DB |
+| Hash algorithm thay đổi | `sha256(source_text)` cố định; không đổi khi đã có dữ liệu trong TM DB |

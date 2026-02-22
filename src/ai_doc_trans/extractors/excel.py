@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import re
 from pathlib import Path
 from typing import Iterator, Optional
@@ -9,12 +8,8 @@ import openpyxl
 
 from ai_doc_trans.engine.tm import TM
 from ai_doc_trans.extractors.base import BaseExtractor
+from ai_doc_trans.hash_utils import compute_source_hash
 from ai_doc_trans.models import Segment
-
-
-def _compute_hash(structure: str, source_text: str) -> str:
-    payload = (structure + source_text).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()
 
 
 def _is_text_cell(cell) -> bool:
@@ -59,6 +54,7 @@ class ExcelExtractor(BaseExtractor):
         return any(p.search(text) for p in self._get_skip_patterns())
 
     def extract(self, path: Path) -> Iterator[Segment]:
+        seen_hashes: set[str] = set()
         wb = openpyxl.load_workbook(str(path), data_only=True)
         for sheet in wb.worksheets:
             for row in sheet.iter_rows():
@@ -68,14 +64,19 @@ class ExcelExtractor(BaseExtractor):
                     text = str(cell.value).strip()
                     if self._should_skip(text):
                         continue
+                    source_hash = compute_source_hash(text)
+                    if source_hash in seen_hashes:
+                        continue
+                    seen_hashes.add(source_hash)
+
                     structure = "cell"
-                    source_hash = _compute_hash(structure, text)
                     position = f"{sheet.title}!{cell.coordinate}"
                     source_id = self.tm.get_or_create_source(
                         source_hash=source_hash,
                         source_text=text,
                         source_lang=self.source_lang,
                         structure=structure,
+                        project_id=self.project_id,
                         position=position,
                     )
                     yield Segment(

@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS projects (
 
 CREATE TABLE IF NOT EXISTS segment_sources (
     id          INTEGER NOT NULL,
+    project_id  INTEGER NOT NULL,
     source_hash TEXT    NOT NULL,
     source_text TEXT    NOT NULL,
     source_lang TEXT    NOT NULL,
@@ -33,20 +34,19 @@ CREATE TABLE IF NOT EXISTS segment_sources (
     position    TEXT,
     created_at  TEXT    NOT NULL,
     PRIMARY KEY (id),
-    UNIQUE (source_hash)
+    UNIQUE (source_hash, project_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_segment_sources_hash
-    ON segment_sources(source_hash);
+CREATE INDEX IF NOT EXISTS idx_segment_sources_hash_project
+    ON segment_sources(source_hash, project_id);
 
 CREATE TABLE IF NOT EXISTS segment_targets (
     source_id   INTEGER NOT NULL,
     target_lang TEXT    NOT NULL,
-    project_id  INTEGER NOT NULL DEFAULT 1,
     target_text TEXT    NOT NULL,
     created_at  TEXT    NOT NULL,
     updated_at  TEXT    NOT NULL,
-    PRIMARY KEY (source_id, target_lang, project_id),
+    PRIMARY KEY (source_id, target_lang),
     FOREIGN KEY (source_id) REFERENCES segment_sources(id) ON DELETE CASCADE
 );
 
@@ -159,72 +159,131 @@ class TM:
         source_text: str,
         source_lang: str,
         structure: str,
+        project_id: int,
         position: Optional[str] = None,
     ) -> int:
         row = self._conn.execute(
-            "SELECT id FROM segment_sources WHERE source_hash = ?", (source_hash,)
+            "SELECT id FROM segment_sources WHERE source_hash = ? AND project_id = ?",
+            (source_hash, project_id),
         ).fetchone()
         if row:
             return row["id"]
         cur = self._conn.execute(
             """INSERT INTO segment_sources
-               (source_hash, source_text, source_lang, structure, position, created_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (source_hash, source_text, source_lang, structure, position, _now()),
+               (source_hash, source_text, source_lang, structure, project_id, position, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (source_hash, source_text, source_lang, structure, project_id, position, _now()),
         )
         self._conn.commit()
         return cur.lastrowid  # type: ignore[return-value]
 
-    def get_target(
-        self, source_id: int, target_lang: str, project_id: int
-    ) -> Optional[str]:
-        """Look up translation; prefer project-specific, fall back to global (id=1)."""
+    def get_target(self, source_id: int, target_lang: str) -> Optional[str]:
+        """Look up translation by source_id and target_lang."""
         row = self._conn.execute(
             """SELECT target_text FROM segment_targets
-               WHERE source_id = ? AND target_lang = ? AND project_id = ?""",
-            (source_id, target_lang, project_id),
+               WHERE source_id = ? AND target_lang = ?""",
+            (source_id, target_lang),
         ).fetchone()
-        if row:
-            return row["target_text"]
-        if project_id != 1:
-            row = self._conn.execute(
-                """SELECT target_text FROM segment_targets
-                   WHERE source_id = ? AND target_lang = ? AND project_id = 1""",
-                (source_id, target_lang),
-            ).fetchone()
-            if row:
-                return row["target_text"]
-        return None
+        return row["target_text"] if row else None
+
+    def get_source_id_by_hash(
+        self, source_hash: str, project_id: int
+    ) -> Optional[int]:
+        """Look up segment_sources.id by (source_hash, project_id). Returns None if not found."""
+        row = self._conn.execute(
+            "SELECT id FROM segment_sources WHERE source_hash = ? AND project_id = ?",
+            (source_hash, project_id),
+        ).fetchone()
+        return row["id"] if row is not None else None
 
     def get_target_by_hash(
         self, source_hash: str, target_lang: str, project_id: int
     ) -> Optional[str]:
-        """Convenience: look up translation by hash (used in rebuild)."""
-        row = self._conn.execute(
-            "SELECT id FROM segment_sources WHERE source_hash = ?", (source_hash,)
-        ).fetchone()
-        if row is None:
+        """Look up translation by hash (used in rebuild). Source is project-specific."""
+        sid = self.get_source_id_by_hash(source_hash, project_id)
+        if sid is None:
             return None
-        return self.get_target(row["id"], target_lang, project_id)
+        return self.get_target(sid, target_lang)
 
     def upsert_target(
         self,
         source_id: int,
         target_lang: str,
-        project_id: int,
         target_text: str,
     ) -> None:
         now = _now()
         self._conn.execute(
             """INSERT INTO segment_targets
-               (source_id, target_lang, project_id, target_text, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?)
-               ON CONFLICT(source_id, target_lang, project_id)
+               (source_id, target_lang, target_text, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(source_id, target_lang)
                DO UPDATE SET target_text = excluded.target_text,
                              updated_at  = excluded.updated_at""",
-            (source_id, target_lang, project_id, target_text, now, now),
+            (source_id, target_lang, target_text, now, now),
         )
         self._conn.commit()
+
+    def clear_project_segments(self, project_id: int) -> int:
+        """Delete all segment_sources (and cascade to segment_targets) for the project.
+        Returns the number of segment_sources deleted.
+        """
+        cur = self._conn.execute(
+            "DELETE FROM segment_sources WHERE project_id = ?", (project_id,)
+        )
+        self._conn.commit()
+        return cur.rowcount
+
+    def list_segment_translations(
+        self,
+        project_id: int,
+        target_lang: str,
+        source_lang: str | None = None,
+    ) -> list[dict]:
+        """List segment translations for export (segment_sources + segment_targets).
+
+        Returns rows with: source, target, source_lang, target_lang, structure, position.
+        """
+        query = """SELECT ss.source_text AS source, st.target_text AS target,
+                          ss.source_lang, st.target_lang, ss.structure, ss.position
+                   FROM segment_sources ss
+                   JOIN segment_targets st ON st.source_id = ss.id
+                   WHERE ss.project_id = ? AND st.target_lang = ?"""
+        params: list[object] = [project_id, target_lang]
+        if source_lang is not None:
+            query += " AND ss.source_lang = ?"
+            params.append(source_lang)
+        query += " ORDER BY ss.id"
+        rows = self._conn.execute(query, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def list_all_segments_for_export(
+        self,
+        project_id: int,
+        target_lang: str,
+        source_lang: str | None = None,
+    ) -> list[dict]:
+        """List ALL segment sources for export, with target when available (empty if none).
+
+        Uses LEFT JOIN so segments without translation are included.
+        Returns rows with: source, target, source_lang, target_lang, structure, position.
+        """
+        query = """SELECT ss.source_text AS source,
+                          COALESCE(st.target_text, '') AS target,
+                          ss.source_lang,
+                          ? AS target_lang,
+                          ss.structure,
+                          ss.position
+                   FROM segment_sources ss
+                   LEFT JOIN segment_targets st
+                     ON st.source_id = ss.id AND st.target_lang = ?
+                   WHERE ss.project_id = ?"""
+        params: list[object] = [target_lang, target_lang, project_id]
+        if source_lang is not None:
+            query += " AND ss.source_lang = ?"
+            params.append(source_lang)
+        query += " ORDER BY ss.id"
+        rows = self._conn.execute(query, params).fetchall()
+        return [dict(r) for r in rows]
 
     # ------------------------------------------------------------------
     # Glossary

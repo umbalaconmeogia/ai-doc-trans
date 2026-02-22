@@ -71,7 +71,7 @@ def _translate_update(
     to_translate_segments: list[Segment] = []
 
     for i, seg in enumerate(segments):
-        cached = tm.get_target(seg.source_id, target_lang, project_id)
+        cached = tm.get_target(seg.source_id, target_lang)
         if cached is not None:
             results[i] = TranslatedSegment.from_segment(seg, cached, target_lang)
         else:

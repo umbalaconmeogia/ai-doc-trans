@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import logging
 import re
 from pathlib import Path
@@ -9,14 +8,10 @@ import openpyxl
 
 from ai_doc_trans.engine.tm import TM
 from ai_doc_trans.exceptions import MissingTranslationsError
+from ai_doc_trans.hash_utils import compute_source_hash
 from ai_doc_trans.rebuilders.base import BaseRebuilder
 
 logger = logging.getLogger(__name__)
-
-
-def _compute_hash(structure: str, source_text: str) -> str:
-    payload = (structure + source_text).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()
 
 
 def _is_text_cell(cell) -> bool:
@@ -75,7 +70,7 @@ class ExcelRebuilder(BaseRebuilder):
                         continue
 
                     structure = "cell"
-                    source_hash = _compute_hash(structure, text)
+                    source_hash = compute_source_hash(text)
                     target_text = self.tm.get_target_by_hash(
                         source_hash, self.target_lang, self.project_id
                     )
