@@ -1,2 +1,2 @@
-project_id,project_name,rule_name,rule_type,content,remarks
-1,global,Product code,do_not_translate_pattern,^[A-Za-z0-9]+$,Sample: NVL001
+"project_id","project_name","rule_name","rule_type","content","remarks"
+1,"global","Product code","do_not_translate_pattern","^[A-Za-z][A-Za-z0-9]+[a-z0-9]$","Sample: NVL001"
